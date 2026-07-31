@@ -138,7 +138,12 @@ async def on_startup(app: web.Application) -> None:
 
 
 async def on_shutdown(app: web.Application) -> None:
-    await bot.delete_webhook()
+    # Не трогаем вебхук здесь: на Render старый инстанс завершается уже
+    # после того, как новый успел его переустановить (редеплой), а на free
+    # tier это же событие происходит и при штатном "засыпании" — удаление
+    # вебхука в обоих случаях оставило бы бота без единственного способа
+    # получать сообщения.
+    await bot.session.close()
 
 
 async def handle_health(request: web.Request) -> web.Response:
