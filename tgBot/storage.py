@@ -149,8 +149,9 @@ def save_entry(
     media_bytes: bytes | None = None,
     media_extension: str | None = None,
     media_mime: str | None = None,
+    date: datetime | None = None,
 ) -> str:
-    date = now_moscow()
+    date = date if date is not None else now_moscow()
     stamp = date.strftime("%Y-%m-%d_%H%M%S")
     entry_filename = f"{stamp}_{tag}.md"
 
@@ -203,10 +204,7 @@ def list_entries(days: int = 7) -> list[dict]:
     return recent
 
 
-def retag_entry(number: int, new_tag: str, days: int = 7) -> dict:
-    service = get_drive_service()
-    structure = ensure_structure()
-
+def _lookup_recent(service, structure, number: int, days: int) -> tuple[list[dict], dict]:
     raw = service.files().get_media(fileId=structure["index_file_id"]).execute()
     entries = json.loads(raw)
 
@@ -217,9 +215,14 @@ def retag_entry(number: int, new_tag: str, days: int = 7) -> dict:
     if number < 1 or number > len(recent):
         raise ValueError(f"Нет записи №{number} за последние {days} дней")
 
-    target = recent[number - 1]  # same dict object as inside `entries`
+    return entries, recent[number - 1]  # target is the same dict object as inside `entries`
+
+
+def _apply_entry_update(service, structure, target: dict, new_tag: str, new_date: datetime) -> None:
     old_tag = target["tag"]
-    stamp = datetime.fromisoformat(target["date"]).strftime("%Y-%m-%d_%H%M%S")
+    old_date_iso = target["date"]
+    new_date_iso = new_date.isoformat()
+    new_stamp = new_date.strftime("%Y-%m-%d_%H%M%S")
 
     old_entry_name = target["entry_path"].split("/")[-1]
     entry_file_id = _find_child(service, old_entry_name, structure["entries_folder_id"])
@@ -228,33 +231,66 @@ def retag_entry(number: int, new_tag: str, days: int = 7) -> dict:
 
     content = service.files().get_media(fileId=entry_file_id).execute().decode("utf-8")
     content = content.replace(f"tag: {old_tag}\n", f"tag: {new_tag}\n", 1)
-    new_entry_name = f"{stamp}_{new_tag}.md"
+    content = content.replace(f"date: {old_date_iso}\n", f"date: {new_date_iso}\n", 1)
+    new_entry_name = f"{new_stamp}_{new_tag}.md"
     updated_media = MediaIoBaseUpload(io.BytesIO(content.encode("utf-8")), mimetype="text/markdown")
     service.files().update(
         fileId=entry_file_id, body={"name": new_entry_name}, media_body=updated_media
     ).execute()
-    target["entry_path"] = f"entries/{new_entry_name}"
 
     if target.get("media_path"):
         old_media_name = target["media_path"].split("/")[-1]
         extension = old_media_name.rsplit(".", 1)[-1]
         media_file_id = _find_child(service, old_media_name, structure["media_folder_id"])
         if media_file_id:
-            new_media_name = f"{stamp}_{new_tag}.{extension}"
+            new_media_name = f"{new_stamp}_{new_tag}.{extension}"
             service.files().update(fileId=media_file_id, body={"name": new_media_name}).execute()
             target["media_path"] = f"media/{new_media_name}"
 
     target["tag"] = new_tag
+    target["date"] = new_date_iso
+    target["entry_path"] = f"entries/{new_entry_name}"
 
-    index_media = MediaIoBaseUpload(
+
+def _save_index(service, structure, entries: list[dict]) -> None:
+    media = MediaIoBaseUpload(
         io.BytesIO(json.dumps(entries, ensure_ascii=False, indent=2).encode("utf-8")),
         mimetype="application/json",
     )
-    service.files().update(fileId=structure["index_file_id"], media_body=index_media).execute()
+    service.files().update(fileId=structure["index_file_id"], media_body=media).execute()
+
+
+def retag_entry(number: int, new_tag: str, days: int = 7) -> dict:
+    service = get_drive_service()
+    structure = ensure_structure()
+    entries, target = _lookup_recent(service, structure, number, days)
+
+    old_tag = target["tag"]
+    unchanged_date = datetime.fromisoformat(target["date"])
+    _apply_entry_update(service, structure, target, new_tag=new_tag, new_date=unchanged_date)
+    _save_index(service, structure, entries)
 
     return {
         "old_tag": old_tag,
         "new_tag": new_tag,
         "date": target["date"],
+        "preview": target.get("preview"),
+    }
+
+
+def set_entry_date(number: int, new_date: datetime, days: int = 7) -> dict:
+    service = get_drive_service()
+    structure = ensure_structure()
+    entries, target = _lookup_recent(service, structure, number, days)
+
+    old_date = target["date"]
+    unchanged_tag = target["tag"]
+    _apply_entry_update(service, structure, target, new_tag=unchanged_tag, new_date=new_date)
+    _save_index(service, structure, entries)
+
+    return {
+        "old_date": old_date,
+        "new_date": target["date"],
+        "tag": unchanged_tag,
         "preview": target.get("preview"),
     }

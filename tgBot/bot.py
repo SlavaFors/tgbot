@@ -22,6 +22,12 @@ bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
 HASHTAG_RE = re.compile(r"#(\w+)")
+DATE_ISO_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b(?:[ T](\d{2}):(\d{2}))?")
+DATE_RU_RE = re.compile(r"\b(\d{2})\.(\d{2})\.(\d{4})\b(?:[ ,](\d{2}):(\d{2}))?")
+
+
+class InvalidDateError(ValueError):
+    pass
 
 
 def extract_tag(text: str | None) -> str:
@@ -29,6 +35,37 @@ def extract_tag(text: str | None) -> str:
         return "без_тега"
     match = HASHTAG_RE.search(text)
     return match.group(1) if match else "без_тега"
+
+
+def extract_date_override(text: str | None, now: datetime) -> datetime | None:
+    """Ищет в тексте дату (ГГГГ-ММ-ДД или ДД.ММ.ГГГГ, время опционально) —
+    для добавления старых воспоминаний задним числом. Час/минута/секунда,
+    если не указаны явно, берутся из `now` (чтобы несколько сообщений за
+    один и тот же день не давали одинаковое имя файла)."""
+    if not text:
+        return None
+
+    match = DATE_ISO_RE.search(text)
+    if match:
+        year, month, day, hour, minute = match.groups()
+    else:
+        match = DATE_RU_RE.search(text)
+        if not match:
+            return None
+        day, month, year, hour, minute = match.groups()
+
+    try:
+        return now.replace(
+            year=int(year),
+            month=int(month),
+            day=int(day),
+            hour=int(hour) if hour else now.hour,
+            minute=int(minute) if minute else now.minute,
+        )
+    except ValueError as error:
+        raise InvalidDateError(
+            f"Не получилось разобрать дату «{match.group(0)}» — проверьте, что она существует."
+        ) from error
 
 
 @dp.message.outer_middleware()
@@ -44,8 +81,14 @@ async def cmd_start(message: Message):
         "Пишите текст, фото, голосовые, аудио, видео или видео-кружочки с хэштегом "
         "(например #фраза, #спор, #смешное) — сохраню в дневник. "
         "Без хэштега тоже сохраню, под #без_тега.\n\n"
+        "Чтобы добавить старое воспоминание, укажите дату прямо в тексте/подписи: "
+        "«#слова_Криса 10.05.2023 сказал первое слово „мама“» — сохранится именно этим числом, "
+        "а не сегодняшним.\n\n"
         "/recent — последние записи за 7 дней\n"
-        "/retag <номер> <новый_тег> — исправить тег записи из списка /recent"
+        "/retag <номер> <новый_тег> — исправить тег записи из списка /recent\n"
+        "/setdate <номер> <ГГГГ-ММ-ДД> [ЧЧ:ММ] — исправить дату записи из списка /recent\n\n"
+        "Если отправить /retag или /setdate без аргументов (например через меню команд) — "
+        "бот спросит номер и новое значение отдельным сообщением, на которое нужно ответить (reply)."
     )
 
 
@@ -68,19 +111,13 @@ async def cmd_recent(message: Message):
     await message.answer("\n".join(lines))
 
 
-@dp.message(Command("retag"))
-async def cmd_retag(message: Message):
-    args = (message.text or "").split(maxsplit=2)
-    if len(args) < 3:
-        await message.answer(
-            "Формат: /retag <номер> <новый_тег>\n"
-            "Номер — из списка /recent, тег — без решётки, одно слово."
-        )
-        return
+RETAG_PROMPT = "Ответьте на это сообщение в формате: <номер> <новый_тег>"
+SETDATE_PROMPT = "Ответьте на это сообщение в формате: <номер> <ГГГГ-ММ-ДД> [ЧЧ:ММ]"
 
-    _, number_raw, new_tag_raw = args
+
+async def _do_retag(message: Message, number_raw: str, new_tag_raw: str) -> None:
     if not number_raw.isdigit():
-        await message.answer("Номер должен быть числом. Формат: /retag <номер> <новый_тег>")
+        await message.answer(f"Номер должен быть числом.\n{RETAG_PROMPT}")
         return
 
     new_tag = new_tag_raw.strip().lstrip("#")
@@ -99,99 +136,175 @@ async def cmd_retag(message: Message):
     await message.answer(f"✅ Тег изменён: #{result['old_tag']} → #{result['new_tag']}")
 
 
+async def _do_setdate(message: Message, number_raw: str, date_raw: str) -> None:
+    if not number_raw.isdigit():
+        await message.answer(f"Номер должен быть числом.\n{SETDATE_PROMPT}")
+        return
+
+    now = storage.now_moscow()
+    try:
+        new_date = extract_date_override(date_raw, now)
+    except InvalidDateError as error:
+        await message.answer(f"⚠️ {error}")
+        return
+    if new_date is None:
+        await message.answer(
+            "Не нашёл дату в формате ГГГГ-ММ-ДД или ДД.ММ.ГГГГ (время — опционально, ЧЧ:ММ)."
+        )
+        return
+
+    try:
+        result = await asyncio.to_thread(
+            storage.set_entry_date, number=int(number_raw), new_date=new_date, days=RECENT_DAYS
+        )
+    except ValueError as error:
+        await message.answer(f"⚠️ {error}")
+        return
+
+    old_date = datetime.fromisoformat(result["old_date"])
+    new_date_result = datetime.fromisoformat(result["new_date"])
+    await message.answer(
+        f"✅ Дата записи #{result['tag']} изменена: "
+        f"{old_date.strftime('%d.%m.%Y %H:%M')} → {new_date_result.strftime('%d.%m.%Y %H:%M')}"
+    )
+
+
+@dp.message(Command("retag"))
+async def cmd_retag(message: Message):
+    args = (message.text or "").split(maxsplit=2)
+    if len(args) < 3:
+        # Отправлено через меню/автодополнение без аргументов — Telegram шлёт
+        # такие команды сразу, без возможности дописать текст. Просим ответить
+        # (reply) на этот же вопрос отдельным сообщением.
+        await message.answer(RETAG_PROMPT)
+        return
+    await _do_retag(message, args[1], args[2])
+
+
+@dp.message(Command("setdate"))
+async def cmd_setdate(message: Message):
+    args = (message.text or "").split(maxsplit=2)
+    if len(args) < 3:
+        await message.answer(SETDATE_PROMPT)
+        return
+    await _do_setdate(message, args[1], args[2])
+
+
+def _is_reply_to_correction_prompt(message: Message) -> bool:
+    parent = message.reply_to_message
+    return bool(parent and parent.text in (RETAG_PROMPT, SETDATE_PROMPT))
+
+
+@dp.message(_is_reply_to_correction_prompt)
+async def handle_correction_reply(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Нужно два значения: номер и новое значение через пробел.")
+        return
+
+    if message.reply_to_message.text == RETAG_PROMPT:
+        await _do_retag(message, parts[0], parts[1])
+    else:
+        await _do_setdate(message, parts[0], parts[1])
+
+
+async def _save_and_reply(message: Message, source_text: str | None, **save_kwargs) -> None:
+    tag = extract_tag(source_text)
+    now = storage.now_moscow()
+    try:
+        date_override = extract_date_override(source_text, now)
+    except InvalidDateError as error:
+        await message.answer(f"⚠️ {error}")
+        return
+
+    tag_used = await asyncio.to_thread(
+        storage.save_entry, tag=tag, date=date_override, **save_kwargs
+    )
+    reply = f"✅ Сохранено под #{tag_used}"
+    if date_override is not None:
+        reply += f" ({date_override.strftime('%d.%m.%Y')})"
+    await message.answer(reply)
+
+
 @dp.message(F.text)
 async def handle_text(message: Message):
-    tag = extract_tag(message.text)
-    tag_used = await asyncio.to_thread(
-        storage.save_entry, tag=tag, msg_type="text", text=message.text
-    )
-    await message.answer(f"✅ Сохранено под #{tag_used}")
+    await _save_and_reply(message, message.text, msg_type="text", text=message.text)
 
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
-    tag = extract_tag(message.caption)
     file = await bot.get_file(message.photo[-1].file_id)
     buffer = await bot.download_file(file.file_path)
-    tag_used = await asyncio.to_thread(
-        storage.save_entry,
-        tag=tag,
+    await _save_and_reply(
+        message,
+        message.caption,
         msg_type="photo",
         text=message.caption,
         media_bytes=buffer.read(),
         media_extension="jpg",
         media_mime="image/jpeg",
     )
-    await message.answer(f"✅ Сохранено под #{tag_used}")
 
 
 @dp.message(F.voice)
 async def handle_voice(message: Message):
-    tag = extract_tag(message.caption)
     file = await bot.get_file(message.voice.file_id)
     buffer = await bot.download_file(file.file_path)
-    tag_used = await asyncio.to_thread(
-        storage.save_entry,
-        tag=tag,
+    await _save_and_reply(
+        message,
+        message.caption,
         msg_type="voice",
         media_bytes=buffer.read(),
         media_extension="ogg",
         media_mime="audio/ogg",
     )
-    await message.answer(f"✅ Сохранено под #{tag_used}")
 
 
 @dp.message(F.audio)
 async def handle_audio(message: Message):
-    tag = extract_tag(message.caption)
     file = await bot.get_file(message.audio.file_id)
     buffer = await bot.download_file(file.file_path)
     extension = Path(file.file_path).suffix.lstrip(".") or "bin"
     mime_type = message.audio.mime_type or "application/octet-stream"
-    tag_used = await asyncio.to_thread(
-        storage.save_entry,
-        tag=tag,
+    await _save_and_reply(
+        message,
+        message.caption,
         msg_type="audio",
         media_bytes=buffer.read(),
         media_extension=extension,
         media_mime=mime_type,
     )
-    await message.answer(f"✅ Сохранено под #{tag_used}")
 
 
 @dp.message(F.video_note)
 async def handle_video_note(message: Message):
-    tag = extract_tag(message.caption)
     file = await bot.get_file(message.video_note.file_id)
     buffer = await bot.download_file(file.file_path)
-    tag_used = await asyncio.to_thread(
-        storage.save_entry,
-        tag=tag,
+    await _save_and_reply(
+        message,
+        message.caption,
         msg_type="video_note",
         media_bytes=buffer.read(),
         media_extension="mp4",
         media_mime="video/mp4",
     )
-    await message.answer(f"✅ Сохранено под #{tag_used}")
 
 
 @dp.message(F.video)
 async def handle_video(message: Message):
-    tag = extract_tag(message.caption)
     file = await bot.get_file(message.video.file_id)
     buffer = await bot.download_file(file.file_path)
     extension = Path(file.file_path).suffix.lstrip(".") or "mp4"
     mime_type = message.video.mime_type or "video/mp4"
-    tag_used = await asyncio.to_thread(
-        storage.save_entry,
-        tag=tag,
+    await _save_and_reply(
+        message,
+        message.caption,
         msg_type="video",
         text=message.caption,
         media_bytes=buffer.read(),
         media_extension=extension,
         media_mime=mime_type,
     )
-    await message.answer(f"✅ Сохранено под #{tag_used}")
 
 
 @dp.message()
