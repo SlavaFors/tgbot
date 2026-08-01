@@ -40,7 +40,7 @@ async def allowed_user_only(handler, event: Message, data):
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
-        "Пишите текст, фото, голосовые, аудио или видео-кружочки с хэштегом "
+        "Пишите текст, фото, голосовые, аудио, видео или видео-кружочки с хэштегом "
         "(например #фраза, #спор, #смешное) — сохраню в дневник. "
         "Без хэштега тоже сохраню, под #без_тега."
     )
@@ -118,6 +118,25 @@ async def handle_video_note(message: Message):
         media_bytes=buffer.read(),
         media_extension="mp4",
         media_mime="video/mp4",
+    )
+    await message.answer(f"✅ Сохранено под #{tag_used}")
+
+
+@dp.message(F.video)
+async def handle_video(message: Message):
+    tag = extract_tag(message.caption)
+    file = await bot.get_file(message.video.file_id)
+    buffer = await bot.download_file(file.file_path)
+    extension = Path(file.file_path).suffix.lstrip(".") or "mp4"
+    mime_type = message.video.mime_type or "video/mp4"
+    tag_used = await asyncio.to_thread(
+        storage.save_entry,
+        tag=tag,
+        msg_type="video",
+        text=message.caption,
+        media_bytes=buffer.read(),
+        media_extension=extension,
+        media_mime=mime_type,
     )
     await message.answer(f"✅ Сохранено под #{tag_used}")
 
