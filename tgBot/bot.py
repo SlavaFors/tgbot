@@ -84,7 +84,8 @@ async def cmd_start(message: Message):
         "Чтобы добавить старое воспоминание, укажите дату прямо в тексте/подписи: "
         "«#слова_Криса 10.05.2023 сказал первое слово „мама“» — сохранится именно этим числом, "
         "а не сегодняшним.\n\n"
-        "/recent — последние записи за 7 дней\n"
+        "/recent — записи, добавленные за последние 7 дней (не по дате события, "
+        "а по тому, когда реально отправили боту)\n"
         "/retag <номер> <новый_тег> — исправить тег записи из списка /recent\n"
         "/setdate <номер> <ГГГГ-ММ-ДД> [ЧЧ:ММ] — исправить дату записи из списка /recent\n"
         "/delete <номер> — удалить запись из списка /recent (файлы уходят в корзину Drive)\n\n"
@@ -100,14 +101,14 @@ RECENT_DAYS = 7
 async def cmd_recent(message: Message):
     entries = await asyncio.to_thread(storage.list_entries, days=RECENT_DAYS)
     if not entries:
-        await message.answer(f"За последние {RECENT_DAYS} дней записей нет.")
+        await message.answer(f"За последние {RECENT_DAYS} дней ничего не добавляли.")
         return
 
-    lines = [f"Записи за последние {RECENT_DAYS} дней:"]
+    lines = [f"Добавлено за последние {RECENT_DAYS} дней (дата в скобках — дата события):"]
     for i, entry in enumerate(entries, start=1):
         date = datetime.fromisoformat(entry["date"])
         preview = entry.get("preview") or f"[{entry['type']}]"
-        lines.append(f"{i}. #{entry['tag']} — {preview} ({date.strftime('%d.%m %H:%M')})")
+        lines.append(f"{i}. #{entry['tag']} — {preview} ({date.strftime('%d.%m.%Y %H:%M')})")
     lines.append(
         "\nИсправить: /retag <номер> <тег> · /setdate <номер> <дата> · /delete <номер>"
     )
@@ -356,7 +357,7 @@ async def handle_unsupported(message: Message):
 
 BOT_COMMANDS = [
     BotCommand(command="start", description="Как пользоваться ботом"),
-    BotCommand(command="recent", description="Записи за последние 7 дней"),
+    BotCommand(command="recent", description="Записи, добавленные за 7 дней"),
     BotCommand(command="retag", description="Исправить тег записи"),
     BotCommand(command="setdate", description="Исправить дату записи"),
     BotCommand(command="delete", description="Удалить запись"),

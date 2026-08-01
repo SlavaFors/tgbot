@@ -151,7 +151,8 @@ def save_entry(
     media_mime: str | None = None,
     date: datetime | None = None,
 ) -> str:
-    date = date if date is not None else now_moscow()
+    added_at = now_moscow()
+    date = date if date is not None else added_at
     stamp = date.strftime("%Y-%m-%d_%H%M%S")
     entry_filename = f"{stamp}_{tag}.md"
 
@@ -177,6 +178,7 @@ def save_entry(
     append_index_entry(
         {
             "date": date.isoformat(),
+            "added_at": added_at.isoformat(),
             "tag": tag,
             "type": msg_type,
             "entry_path": f"entries/{entry_filename}",
@@ -186,6 +188,21 @@ def save_entry(
     )
 
     return tag
+
+
+def _added_at(entry: dict) -> str:
+    # "added_at" — когда запись реально прислали боту; "date" — дата самого
+    # события, может быть задним числом (см. save_entry). Записи, сохранённые
+    # до появления этого поля, используют "date" как добавление — до этой
+    # правки они всегда совпадали.
+    return entry.get("added_at", entry["date"])
+
+
+def _filter_recent(entries: list[dict], days: int) -> list[dict]:
+    cutoff = now_moscow() - timedelta(days=days)
+    recent = [e for e in entries if datetime.fromisoformat(_added_at(e)) >= cutoff]
+    recent.sort(key=_added_at, reverse=True)
+    return recent
 
 
 def list_entries(days: int = 7) -> list[dict]:
@@ -198,22 +215,16 @@ def list_entries(days: int = 7) -> list[dict]:
     except (json.JSONDecodeError, TypeError):
         entries = []
 
-    cutoff = now_moscow() - timedelta(days=days)
-    recent = [e for e in entries if datetime.fromisoformat(e["date"]) >= cutoff]
-    recent.sort(key=lambda e: e["date"], reverse=True)
-    return recent
+    return _filter_recent(entries, days)
 
 
 def _lookup_recent(service, structure, number: int, days: int) -> tuple[list[dict], dict]:
     raw = service.files().get_media(fileId=structure["index_file_id"]).execute()
     entries = json.loads(raw)
 
-    cutoff = now_moscow() - timedelta(days=days)
-    recent = [e for e in entries if datetime.fromisoformat(e["date"]) >= cutoff]
-    recent.sort(key=lambda e: e["date"], reverse=True)
-
+    recent = _filter_recent(entries, days)
     if number < 1 or number > len(recent):
-        raise ValueError(f"Нет записи №{number} за последние {days} дней")
+        raise ValueError(f"Нет записи №{number} среди добавленных за последние {days} дней")
 
     return entries, recent[number - 1]  # target is the same dict object as inside `entries`
 
