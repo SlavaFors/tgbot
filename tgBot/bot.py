@@ -86,9 +86,10 @@ async def cmd_start(message: Message):
         "а не сегодняшним.\n\n"
         "/recent — последние записи за 7 дней\n"
         "/retag <номер> <новый_тег> — исправить тег записи из списка /recent\n"
-        "/setdate <номер> <ГГГГ-ММ-ДД> [ЧЧ:ММ] — исправить дату записи из списка /recent\n\n"
-        "Если отправить /retag или /setdate без аргументов (например через меню команд) — "
-        "бот спросит номер и новое значение отдельным сообщением, на которое нужно ответить (reply)."
+        "/setdate <номер> <ГГГГ-ММ-ДД> [ЧЧ:ММ] — исправить дату записи из списка /recent\n"
+        "/delete <номер> — удалить запись из списка /recent (файлы уходят в корзину Drive)\n\n"
+        "Если отправить /retag, /setdate или /delete без аргументов (например через меню команд) — "
+        "бот спросит нужные данные отдельным сообщением, на которое нужно ответить (reply)."
     )
 
 
@@ -107,12 +108,15 @@ async def cmd_recent(message: Message):
         date = datetime.fromisoformat(entry["date"])
         preview = entry.get("preview") or f"[{entry['type']}]"
         lines.append(f"{i}. #{entry['tag']} — {preview} ({date.strftime('%d.%m %H:%M')})")
-    lines.append("\nЧтобы исправить тег: /retag <номер> <новый_тег>")
+    lines.append(
+        "\nИсправить: /retag <номер> <тег> · /setdate <номер> <дата> · /delete <номер>"
+    )
     await message.answer("\n".join(lines))
 
 
 RETAG_PROMPT = "Ответьте на это сообщение в формате: <номер> <новый_тег>"
 SETDATE_PROMPT = "Ответьте на это сообщение в формате: <номер> <ГГГГ-ММ-ДД> [ЧЧ:ММ]"
+DELETE_PROMPT = "Ответьте на это сообщение номером записи для удаления"
 
 
 async def _do_retag(message: Message, number_raw: str, new_tag_raw: str) -> None:
@@ -169,6 +173,28 @@ async def _do_setdate(message: Message, number_raw: str, date_raw: str) -> None:
     )
 
 
+async def _do_delete(message: Message, number_raw: str) -> None:
+    number_raw = number_raw.strip()
+    if not number_raw.isdigit():
+        await message.answer(f"Номер должен быть числом.\n{DELETE_PROMPT}")
+        return
+
+    try:
+        result = await asyncio.to_thread(
+            storage.delete_entry, number=int(number_raw), days=RECENT_DAYS
+        )
+    except ValueError as error:
+        await message.answer(f"⚠️ {error}")
+        return
+
+    date = datetime.fromisoformat(result["date"])
+    preview = result.get("preview") or f"[{result['tag']}]"
+    await message.answer(
+        f"🗑 Удалено: #{result['tag']} — {preview} ({date.strftime('%d.%m.%Y %H:%M')})\n"
+        "Файлы перемещены в корзину Google Drive — можно восстановить в течение 30 дней."
+    )
+
+
 @dp.message(Command("retag"))
 async def cmd_retag(message: Message):
     args = (message.text or "").split(maxsplit=2)
@@ -190,19 +216,35 @@ async def cmd_setdate(message: Message):
     await _do_setdate(message, args[1], args[2])
 
 
+@dp.message(Command("delete"))
+async def cmd_delete(message: Message):
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(DELETE_PROMPT)
+        return
+    await _do_delete(message, args[1])
+
+
 def _is_reply_to_correction_prompt(message: Message) -> bool:
     parent = message.reply_to_message
-    return bool(parent and parent.text in (RETAG_PROMPT, SETDATE_PROMPT))
+    return bool(parent and parent.text in (RETAG_PROMPT, SETDATE_PROMPT, DELETE_PROMPT))
 
 
 @dp.message(_is_reply_to_correction_prompt)
 async def handle_correction_reply(message: Message):
-    parts = (message.text or "").split(maxsplit=1)
+    prompt = message.reply_to_message.text
+    text = (message.text or "").strip()
+
+    if prompt == DELETE_PROMPT:
+        await _do_delete(message, text)
+        return
+
+    parts = text.split(maxsplit=1)
     if len(parts) < 2:
         await message.answer("Нужно два значения: номер и новое значение через пробел.")
         return
 
-    if message.reply_to_message.text == RETAG_PROMPT:
+    if prompt == RETAG_PROMPT:
         await _do_retag(message, parts[0], parts[1])
     else:
         await _do_setdate(message, parts[0], parts[1])
@@ -315,7 +357,9 @@ async def handle_unsupported(message: Message):
 BOT_COMMANDS = [
     BotCommand(command="start", description="Как пользоваться ботом"),
     BotCommand(command="recent", description="Записи за последние 7 дней"),
-    BotCommand(command="retag", description="Исправить тег записи: /retag <номер> <тег>"),
+    BotCommand(command="retag", description="Исправить тег записи"),
+    BotCommand(command="setdate", description="Исправить дату записи"),
+    BotCommand(command="delete", description="Удалить запись"),
 ]
 
 

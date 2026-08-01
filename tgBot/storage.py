@@ -294,3 +294,31 @@ def set_entry_date(number: int, new_date: datetime, days: int = 7) -> dict:
         "tag": unchanged_tag,
         "preview": target.get("preview"),
     }
+
+
+def delete_entry(number: int, days: int = 7) -> dict:
+    service = get_drive_service()
+    structure = ensure_structure()
+    entries, target = _lookup_recent(service, structure, number, days)
+
+    # trashed=True (не files().delete()), чтобы случайно удалённую запись
+    # можно было вручную восстановить из корзины Google Drive (30 дней).
+    entry_name = target["entry_path"].split("/")[-1]
+    entry_file_id = _find_child(service, entry_name, structure["entries_folder_id"])
+    if entry_file_id:
+        service.files().update(fileId=entry_file_id, body={"trashed": True}).execute()
+
+    if target.get("media_path"):
+        media_name = target["media_path"].split("/")[-1]
+        media_file_id = _find_child(service, media_name, structure["media_folder_id"])
+        if media_file_id:
+            service.files().update(fileId=media_file_id, body={"trashed": True}).execute()
+
+    remaining = [e for e in entries if e is not target]
+    _save_index(service, structure, remaining)
+
+    return {
+        "tag": target["tag"],
+        "date": target["date"],
+        "preview": target.get("preview"),
+    }
