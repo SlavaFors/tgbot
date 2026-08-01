@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
@@ -42,8 +43,60 @@ async def cmd_start(message: Message):
     await message.answer(
         "Пишите текст, фото, голосовые, аудио, видео или видео-кружочки с хэштегом "
         "(например #фраза, #спор, #смешное) — сохраню в дневник. "
-        "Без хэштега тоже сохраню, под #без_тега."
+        "Без хэштега тоже сохраню, под #без_тега.\n\n"
+        "/recent — последние записи за 7 дней\n"
+        "/retag <номер> <новый_тег> — исправить тег записи из списка /recent"
     )
+
+
+RECENT_DAYS = 7
+
+
+@dp.message(Command("recent"))
+async def cmd_recent(message: Message):
+    entries = await asyncio.to_thread(storage.list_entries, days=RECENT_DAYS)
+    if not entries:
+        await message.answer(f"За последние {RECENT_DAYS} дней записей нет.")
+        return
+
+    lines = [f"Записи за последние {RECENT_DAYS} дней:"]
+    for i, entry in enumerate(entries, start=1):
+        date = datetime.fromisoformat(entry["date"])
+        preview = entry.get("preview") or f"[{entry['type']}]"
+        lines.append(f"{i}. #{entry['tag']} — {preview} ({date.strftime('%d.%m %H:%M')})")
+    lines.append("\nЧтобы исправить тег: /retag <номер> <новый_тег>")
+    await message.answer("\n".join(lines))
+
+
+@dp.message(Command("retag"))
+async def cmd_retag(message: Message):
+    args = (message.text or "").split(maxsplit=2)
+    if len(args) < 3:
+        await message.answer(
+            "Формат: /retag <номер> <новый_тег>\n"
+            "Номер — из списка /recent, тег — без решётки, одно слово."
+        )
+        return
+
+    _, number_raw, new_tag_raw = args
+    if not number_raw.isdigit():
+        await message.answer("Номер должен быть числом. Формат: /retag <номер> <новый_тег>")
+        return
+
+    new_tag = new_tag_raw.strip().lstrip("#")
+    if not HASHTAG_RE.fullmatch("#" + new_tag):
+        await message.answer("Тег может содержать только буквы, цифры и подчёркивание.")
+        return
+
+    try:
+        result = await asyncio.to_thread(
+            storage.retag_entry, number=int(number_raw), new_tag=new_tag, days=RECENT_DAYS
+        )
+    except ValueError as error:
+        await message.answer(f"⚠️ {error}")
+        return
+
+    await message.answer(f"✅ Тег изменён: #{result['old_tag']} → #{result['new_tag']}")
 
 
 @dp.message(F.text)

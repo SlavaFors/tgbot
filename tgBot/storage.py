@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from google.oauth2.credentials import Credentials
@@ -171,6 +171,8 @@ def save_entry(
 
     upload_markdown(markdown_content, entry_filename)
 
+    preview = text.strip()[:80] if text else None
+
     append_index_entry(
         {
             "date": date.isoformat(),
@@ -178,7 +180,81 @@ def save_entry(
             "type": msg_type,
             "entry_path": f"entries/{entry_filename}",
             "media_path": media_path,
+            "preview": preview,
         }
     )
 
     return tag
+
+
+def list_entries(days: int = 7) -> list[dict]:
+    service = get_drive_service()
+    structure = ensure_structure()
+
+    raw = service.files().get_media(fileId=structure["index_file_id"]).execute()
+    try:
+        entries = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        entries = []
+
+    cutoff = now_moscow() - timedelta(days=days)
+    recent = [e for e in entries if datetime.fromisoformat(e["date"]) >= cutoff]
+    recent.sort(key=lambda e: e["date"], reverse=True)
+    return recent
+
+
+def retag_entry(number: int, new_tag: str, days: int = 7) -> dict:
+    service = get_drive_service()
+    structure = ensure_structure()
+
+    raw = service.files().get_media(fileId=structure["index_file_id"]).execute()
+    entries = json.loads(raw)
+
+    cutoff = now_moscow() - timedelta(days=days)
+    recent = [e for e in entries if datetime.fromisoformat(e["date"]) >= cutoff]
+    recent.sort(key=lambda e: e["date"], reverse=True)
+
+    if number < 1 or number > len(recent):
+        raise ValueError(f"Нет записи №{number} за последние {days} дней")
+
+    target = recent[number - 1]  # same dict object as inside `entries`
+    old_tag = target["tag"]
+    stamp = datetime.fromisoformat(target["date"]).strftime("%Y-%m-%d_%H%M%S")
+
+    old_entry_name = target["entry_path"].split("/")[-1]
+    entry_file_id = _find_child(service, old_entry_name, structure["entries_folder_id"])
+    if entry_file_id is None:
+        raise ValueError("Не найден markdown-файл записи в Google Drive")
+
+    content = service.files().get_media(fileId=entry_file_id).execute().decode("utf-8")
+    content = content.replace(f"tag: {old_tag}\n", f"tag: {new_tag}\n", 1)
+    new_entry_name = f"{stamp}_{new_tag}.md"
+    updated_media = MediaIoBaseUpload(io.BytesIO(content.encode("utf-8")), mimetype="text/markdown")
+    service.files().update(
+        fileId=entry_file_id, body={"name": new_entry_name}, media_body=updated_media
+    ).execute()
+    target["entry_path"] = f"entries/{new_entry_name}"
+
+    if target.get("media_path"):
+        old_media_name = target["media_path"].split("/")[-1]
+        extension = old_media_name.rsplit(".", 1)[-1]
+        media_file_id = _find_child(service, old_media_name, structure["media_folder_id"])
+        if media_file_id:
+            new_media_name = f"{stamp}_{new_tag}.{extension}"
+            service.files().update(fileId=media_file_id, body={"name": new_media_name}).execute()
+            target["media_path"] = f"media/{new_media_name}"
+
+    target["tag"] = new_tag
+
+    index_media = MediaIoBaseUpload(
+        io.BytesIO(json.dumps(entries, ensure_ascii=False, indent=2).encode("utf-8")),
+        mimetype="application/json",
+    )
+    service.files().update(fileId=structure["index_file_id"], media_body=index_media).execute()
+
+    return {
+        "old_tag": old_tag,
+        "new_tag": new_tag,
+        "date": target["date"],
+        "preview": target.get("preview"),
+    }
