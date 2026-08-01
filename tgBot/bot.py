@@ -8,7 +8,7 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import BotCommand, Message
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
@@ -199,7 +199,16 @@ async def handle_unsupported(message: Message):
     await message.answer("⚠️ Этот тип сообщения не поддерживается")
 
 
+BOT_COMMANDS = [
+    BotCommand(command="start", description="Как пользоваться ботом"),
+    BotCommand(command="recent", description="Записи за последние 7 дней"),
+    BotCommand(command="retag", description="Исправить тег записи: /retag <номер> <тег>"),
+]
+
+
 async def on_startup(app: web.Application) -> None:
+    await bot.set_my_commands(BOT_COMMANDS)
+
     webhook_url = f"{config.RENDER_EXTERNAL_URL}{config.WEBHOOK_PATH}"
     await bot.set_webhook(
         url=webhook_url,
