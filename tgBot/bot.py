@@ -24,7 +24,7 @@ dp = Dispatcher()
 
 HASHTAG_RE = re.compile(r"#(\w+)")
 DATE_ISO_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b(?:[ T](\d{2}):(\d{2}))?")
-DATE_RU_RE = re.compile(r"\b(\d{2})\.(\d{2})\.(\d{4})\b(?:[ ,](\d{2}):(\d{2}))?")
+DATE_RU_RE = re.compile(r"\b(\d{2})\.(\d{2})(?:\.(\d{4}))?\b(?:[ ,](\d{2}):(\d{2}))?")
 DATE_RU_MONTHNAME_RE = re.compile(
     r"\b(\d{1,2})\s+([а-яёА-ЯЁ]{3,})\.?,?\s*(\d{4})?\b(?:[ ,](\d{2}):(\d{2}))?"
 )
@@ -62,6 +62,8 @@ def extract_date_override(text: str | None, now: datetime) -> datetime | None:
         match = DATE_RU_RE.search(text)
         if match:
             day, month, year, hour, minute = match.groups()
+            if year is None:
+                year = now.year
         else:
             match = DATE_RU_MONTHNAME_RE.search(text)
             if not match:
