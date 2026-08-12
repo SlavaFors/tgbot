@@ -7,8 +7,9 @@ from datetime import datetime
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import BotCommand, Message
+from aiogram.types import BotCommand, ErrorEvent, Message
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
@@ -24,6 +25,15 @@ dp = Dispatcher()
 HASHTAG_RE = re.compile(r"#(\w+)")
 DATE_ISO_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b(?:[ T](\d{2}):(\d{2}))?")
 DATE_RU_RE = re.compile(r"\b(\d{2})\.(\d{2})\.(\d{4})\b(?:[ ,](\d{2}):(\d{2}))?")
+DATE_RU_MONTHNAME_RE = re.compile(
+    r"\b(\d{1,2})\s+([а-яёА-ЯЁ]{3,})\.?,?\s*(\d{4})?\b(?:[ ,](\d{2}):(\d{2}))?"
+)
+# Первые три буквы слова (в любом падеже) достаточно, чтобы однозначно
+# определить месяц — "август"/"августа", "май"/"мая" и т.д.
+MONTH_STEMS_RU = {
+    "янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "мая": 5,
+    "июн": 6, "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12,
+}
 
 
 class InvalidDateError(ValueError):
@@ -50,9 +60,18 @@ def extract_date_override(text: str | None, now: datetime) -> datetime | None:
         year, month, day, hour, minute = match.groups()
     else:
         match = DATE_RU_RE.search(text)
-        if not match:
-            return None
-        day, month, year, hour, minute = match.groups()
+        if match:
+            day, month, year, hour, minute = match.groups()
+        else:
+            match = DATE_RU_MONTHNAME_RE.search(text)
+            if not match:
+                return None
+            day, month_word, year, hour, minute = match.groups()
+            month = MONTH_STEMS_RU.get(month_word.lower()[:3])
+            if month is None:
+                return None
+            if year is None:
+                year = now.year
 
     try:
         return now.replace(
@@ -73,6 +92,32 @@ async def allowed_user_only(handler, event: Message, data):
     if event.from_user is None or event.from_user.id != config.ALLOWED_USER_ID:
         return None
     return await handler(event, data)
+
+
+@dp.error()
+async def handle_error(event: ErrorEvent) -> None:
+    # Без этого хендлера необработанное исключение (например, видео больше
+    # 20 МБ — предел скачивания через обычный Telegram Bot API) просто
+    # логировалось и пользователь не получал вообще никакого ответа.
+    logger.exception("Unhandled error while processing update", exc_info=event.exception)
+
+    message = event.update.message
+    if message is None:
+        return
+
+    if isinstance(event.exception, TelegramBadRequest) and "file is too big" in str(event.exception).lower():
+        text = (
+            "⚠️ Файл слишком большой — через Telegram Bot API можно скачивать "
+            "файлы только до 20 МБ. Сожмите видео (или пришлите его видео-кружочком) "
+            "и отправьте ещё раз."
+        )
+    else:
+        text = f"⚠️ Не получилось сохранить: {event.exception}"
+
+    try:
+        await message.answer(text)
+    except Exception:
+        logger.exception("Failed to notify user about the error")
 
 
 @dp.message(Command("start"))
