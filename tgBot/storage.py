@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import functools
 import io
 import json
+import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -18,6 +20,23 @@ INDEX_FILENAME = "index.json"
 
 _drive_service = None
 _structure_cache = None  # {"entries_folder_id": ..., "media_folder_id": ..., "index_file_id": ...}
+
+# Публичные функции вызываются из bot.py через asyncio.to_thread, и альбом из
+# нескольких фото приходит отдельными апдейтами, которые aiogram обрабатывает
+# параллельно. httplib2 внутри googleapiclient не потокобезопасен (общий TLS-
+# сокет ломается: "DECRYPTION_FAILED_OR_BAD_RECORD_MAC", таймауты), а index.json
+# обновляется как read-modify-write — параллельные записи затирали бы друг друга.
+# Поэтому все операции с Drive выполняются строго по одной.
+_drive_lock = threading.Lock()
+
+
+def _serialized(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _drive_lock:
+            return func(*args, **kwargs)
+
+    return wrapper
 
 
 def now_moscow() -> datetime:
@@ -142,6 +161,7 @@ def _build_markdown(date: datetime, tag: str, msg_type: str, body: str) -> str:
     return frontmatter + body.strip() + "\n"
 
 
+@_serialized
 def save_entry(
     tag: str,
     msg_type: str,
@@ -205,6 +225,7 @@ def _filter_recent(entries: list[dict], days: int) -> list[dict]:
     return recent
 
 
+@_serialized
 def list_entries(days: int = 7) -> list[dict]:
     service = get_drive_service()
     structure = ensure_structure()
@@ -271,6 +292,7 @@ def _save_index(service, structure, entries: list[dict]) -> None:
     service.files().update(fileId=structure["index_file_id"], media_body=media).execute()
 
 
+@_serialized
 def retag_entry(number: int, new_tag: str, days: int = 7) -> dict:
     service = get_drive_service()
     structure = ensure_structure()
@@ -289,6 +311,7 @@ def retag_entry(number: int, new_tag: str, days: int = 7) -> dict:
     }
 
 
+@_serialized
 def set_entry_date(number: int, new_date: datetime, days: int = 7) -> dict:
     service = get_drive_service()
     structure = ensure_structure()
@@ -307,6 +330,7 @@ def set_entry_date(number: int, new_date: datetime, days: int = 7) -> dict:
     }
 
 
+@_serialized
 def delete_entry(number: int, days: int = 7) -> dict:
     service = get_drive_service()
     structure = ensure_structure()
