@@ -415,6 +415,17 @@ async def on_startup(app: web.Application) -> None:
     await bot.set_my_commands(BOT_COMMANDS)
 
     webhook_url = f"{config.RENDER_EXTERNAL_URL}{config.WEBHOOK_PATH}"
+    current = await bot.get_webhook_info()
+    if current.url == webhook_url:
+        # Бесплатный Render "засыпает" без трафика и просыпается на следующее
+        # входящее сообщение. Если на каждом старте безусловно вызывать
+        # set_webhook(drop_pending_updates=True), это стирает из очереди
+        # Telegram именно то сообщение, которое только что разбудило сервис,
+        # — бот никогда на него не отвечает. Перерегистрируем (и дропаем
+        # очередь) только когда URL реально изменился.
+        logger.info("Webhook already set to %s", webhook_url)
+        return
+
     await bot.set_webhook(
         url=webhook_url,
         secret_token=config.WEBHOOK_SECRET,
