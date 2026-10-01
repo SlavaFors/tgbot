@@ -161,6 +161,14 @@ def _build_markdown(date: datetime, tag: str, msg_type: str, body: str) -> str:
     return frontmatter + body.strip() + "\n"
 
 
+def _base_filename(date: datetime, tag: str, uid: str | None) -> str:
+    # uid (id сообщения в Telegram) нужен, чтобы имена не совпадали: фото из
+    # одного альбома приходят в одну и ту же секунду, а /retag, /setdate и
+    # /delete ищут файлы в Drive по имени. У старых записей uid нет.
+    stamp = date.strftime("%Y-%m-%d_%H%M%S")
+    return f"{stamp}_{tag}_{uid}" if uid else f"{stamp}_{tag}"
+
+
 @_serialized
 def save_entry(
     tag: str,
@@ -170,11 +178,12 @@ def save_entry(
     media_extension: str | None = None,
     media_mime: str | None = None,
     date: datetime | None = None,
+    uid: str | None = None,
 ) -> str:
     added_at = now_moscow()
     date = date if date is not None else added_at
-    stamp = date.strftime("%Y-%m-%d_%H%M%S")
-    entry_filename = f"{stamp}_{tag}.md"
+    base_name = _base_filename(date, tag, uid)
+    entry_filename = f"{base_name}.md"
 
     media_path = None
     body_parts = []
@@ -183,7 +192,7 @@ def save_entry(
         body_parts.append(text.strip())
 
     if media_bytes is not None:
-        media_filename = f"{stamp}_{tag}.{media_extension}"
+        media_filename = f"{base_name}.{media_extension}"
         _media_file_id, web_view_link = upload_media(media_bytes, media_filename, media_mime)
         media_path = f"media/{media_filename}"
         body_parts.append(f"[Медиафайл]({web_view_link})")
@@ -204,6 +213,7 @@ def save_entry(
             "entry_path": f"entries/{entry_filename}",
             "media_path": media_path,
             "preview": preview,
+            "uid": uid,
         }
     )
 
@@ -254,7 +264,7 @@ def _apply_entry_update(service, structure, target: dict, new_tag: str, new_date
     old_tag = target["tag"]
     old_date_iso = target["date"]
     new_date_iso = new_date.isoformat()
-    new_stamp = new_date.strftime("%Y-%m-%d_%H%M%S")
+    new_base_name = _base_filename(new_date, new_tag, target.get("uid"))
 
     old_entry_name = target["entry_path"].split("/")[-1]
     entry_file_id = _find_child(service, old_entry_name, structure["entries_folder_id"])
@@ -264,7 +274,7 @@ def _apply_entry_update(service, structure, target: dict, new_tag: str, new_date
     content = service.files().get_media(fileId=entry_file_id).execute().decode("utf-8")
     content = content.replace(f"tag: {old_tag}\n", f"tag: {new_tag}\n", 1)
     content = content.replace(f"date: {old_date_iso}\n", f"date: {new_date_iso}\n", 1)
-    new_entry_name = f"{new_stamp}_{new_tag}.md"
+    new_entry_name = f"{new_base_name}.md"
     updated_media = MediaIoBaseUpload(io.BytesIO(content.encode("utf-8")), mimetype="text/markdown")
     service.files().update(
         fileId=entry_file_id, body={"name": new_entry_name}, media_body=updated_media
@@ -275,7 +285,7 @@ def _apply_entry_update(service, structure, target: dict, new_tag: str, new_date
         extension = old_media_name.rsplit(".", 1)[-1]
         media_file_id = _find_child(service, old_media_name, structure["media_folder_id"])
         if media_file_id:
-            new_media_name = f"{new_stamp}_{new_tag}.{extension}"
+            new_media_name = f"{new_base_name}.{extension}"
             service.files().update(fileId=media_file_id, body={"name": new_media_name}).execute()
             target["media_path"] = f"media/{new_media_name}"
 

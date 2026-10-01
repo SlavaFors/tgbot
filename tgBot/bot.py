@@ -127,7 +127,9 @@ async def cmd_start(message: Message):
     await message.answer(
         "Пишите текст, фото, голосовые, аудио, видео или видео-кружочки с хэштегом "
         "(например #фраза, #спор, #смешное) — сохраню в дневник. "
-        "Без хэштега тоже сохраню, под #без_тега.\n\n"
+        "Без хэштега тоже сохраню, под #без_тега. "
+        "В альбоме из нескольких фото/видео достаточно подписать один файл — "
+        "хэштег и дата применятся ко всем.\n\n"
         "Чтобы добавить старое воспоминание, укажите дату прямо в тексте/подписи: "
         "«#слова_Криса 10.05.2023 сказал первое слово „мама“» — сохранится именно этим числом, "
         "а не сегодняшним.\n\n"
@@ -308,7 +310,11 @@ async def _save_and_reply(message: Message, source_text: str | None, **save_kwar
         return
 
     tag_used = await asyncio.to_thread(
-        storage.save_entry, tag=tag, date=date_override, **save_kwargs
+        storage.save_entry,
+        tag=tag,
+        date=date_override,
+        uid=str(message.message_id),
+        **save_kwargs,
     )
     reply = f"✅ Сохранено под #{tag_used}"
     if date_override is not None:
@@ -321,80 +327,97 @@ async def handle_text(message: Message):
     await _save_and_reply(message, message.text, msg_type="text", text=message.text)
 
 
-@dp.message(F.photo)
-async def handle_photo(message: Message):
-    file = await bot.get_file(message.photo[-1].file_id)
+async def _download_media(message: Message) -> dict:
+    if message.photo:
+        msg_type, media, extension, mime_type = "photo", message.photo[-1], "jpg", "image/jpeg"
+    elif message.video:
+        msg_type, media = "video", message.video
+        extension, mime_type = None, message.video.mime_type or "video/mp4"
+    elif message.voice:
+        msg_type, media, extension, mime_type = "voice", message.voice, "ogg", "audio/ogg"
+    elif message.audio:
+        msg_type, media = "audio", message.audio
+        extension, mime_type = None, message.audio.mime_type or "application/octet-stream"
+    else:
+        msg_type, media, extension, mime_type = "video_note", message.video_note, "mp4", "video/mp4"
+
+    file = await bot.get_file(media.file_id)
     buffer = await bot.download_file(file.file_path)
-    await _save_and_reply(
-        message,
-        message.caption,
-        msg_type="photo",
-        text=message.caption,
-        media_bytes=buffer.read(),
-        media_extension="jpg",
-        media_mime="image/jpeg",
-    )
+    if extension is None:
+        default = "mp4" if msg_type == "video" else "bin"
+        extension = Path(file.file_path).suffix.lstrip(".") or default
+
+    return {
+        "msg_type": msg_type,
+        "media_bytes": buffer.read(),
+        "media_extension": extension,
+        "media_mime": mime_type,
+    }
 
 
-@dp.message(F.voice)
-async def handle_voice(message: Message):
-    file = await bot.get_file(message.voice.file_id)
-    buffer = await bot.download_file(file.file_path)
-    await _save_and_reply(
-        message,
-        message.caption,
-        msg_type="voice",
-        media_bytes=buffer.read(),
-        media_extension="ogg",
-        media_mime="audio/ogg",
-    )
+# Альбом Telegram присылает отдельными сообщениями с общим media_group_id, и
+# подпись (а значит, хэштег и дата) есть только у одного из них. Собираем
+# сообщения альбома, пока они приходят, и сохраняем все с этой подписью.
+ALBUM_COLLECT_SECONDS = 2.0
+_pending_albums: dict[str, list[Message]] = {}
 
 
-@dp.message(F.audio)
-async def handle_audio(message: Message):
-    file = await bot.get_file(message.audio.file_id)
-    buffer = await bot.download_file(file.file_path)
-    extension = Path(file.file_path).suffix.lstrip(".") or "bin"
-    mime_type = message.audio.mime_type or "application/octet-stream"
-    await _save_and_reply(
-        message,
-        message.caption,
-        msg_type="audio",
-        media_bytes=buffer.read(),
-        media_extension=extension,
-        media_mime=mime_type,
-    )
+async def _collect_album(message: Message) -> None:
+    group_id = message.media_group_id
+    if group_id in _pending_albums:
+        # Альбом уже собирает хендлер его первого сообщения — он и сохранит.
+        _pending_albums[group_id].append(message)
+        return
+
+    messages = _pending_albums[group_id] = [message]
+    try:
+        seen = 0
+        while seen != len(messages):
+            seen = len(messages)
+            await asyncio.sleep(ALBUM_COLLECT_SECONDS)
+    finally:
+        del _pending_albums[group_id]
+
+    messages.sort(key=lambda m: m.message_id)
+    await _save_album_and_reply(messages)
 
 
-@dp.message(F.video_note)
-async def handle_video_note(message: Message):
-    file = await bot.get_file(message.video_note.file_id)
-    buffer = await bot.download_file(file.file_path)
-    await _save_and_reply(
-        message,
-        message.caption,
-        msg_type="video_note",
-        media_bytes=buffer.read(),
-        media_extension="mp4",
-        media_mime="video/mp4",
-    )
+async def _save_album_and_reply(messages: list[Message]) -> None:
+    first = messages[0]
+    caption = next((m.caption for m in messages if m.caption), None)
+    tag = extract_tag(caption)
+    now = storage.now_moscow()
+    try:
+        date_override = extract_date_override(caption, now)
+    except InvalidDateError as error:
+        await first.answer(f"⚠️ {error}")
+        return
+
+    for message in messages:
+        save_kwargs = await _download_media(message)
+        await asyncio.to_thread(
+            storage.save_entry,
+            tag=tag,
+            date=date_override,
+            uid=str(message.message_id),
+            text=caption,
+            **save_kwargs,
+        )
+
+    reply = f"✅ Сохранено файлов: {len(messages)}, под #{tag}"
+    if date_override is not None:
+        reply += f" ({date_override.strftime('%d.%m.%Y')})"
+    await first.answer(reply)
 
 
-@dp.message(F.video)
-async def handle_video(message: Message):
-    file = await bot.get_file(message.video.file_id)
-    buffer = await bot.download_file(file.file_path)
-    extension = Path(file.file_path).suffix.lstrip(".") or "mp4"
-    mime_type = message.video.mime_type or "video/mp4"
-    await _save_and_reply(
-        message,
-        message.caption,
-        msg_type="video",
-        text=message.caption,
-        media_bytes=buffer.read(),
-        media_extension=extension,
-        media_mime=mime_type,
-    )
+@dp.message(F.photo | F.video | F.voice | F.audio | F.video_note)
+async def handle_media(message: Message):
+    if message.media_group_id:
+        await _collect_album(message)
+        return
+
+    save_kwargs = await _download_media(message)
+    await _save_and_reply(message, message.caption, text=message.caption, **save_kwargs)
 
 
 @dp.message()
